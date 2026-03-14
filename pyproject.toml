@@ -1,0 +1,36 @@
+[project]
+name = "subgen"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=1.13.0",
+    "fastapi>=0.135.1",
+    "faster-whisper>=1.2.1",
+    "ffmpeg-python>=0.2.0",
+    "numpy>=2.4.3",
+    "pillow>=12.1.1",
+    "python-multipart>=0.0.22",
+    "requests>=2.32.5",
+    "sentencepiece>=0.2.0",
+    "stable-ts-whisperless>=2.19.1",
+    "torch>=2.10.0",
+    "tqdm>=4.67.1",
+    "transformers>=4.57.0",
+    "uvicorn>=0.41.0",
+    "watchdog>=6.0.0",
+]
+
+[tool.uv]
+index-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+# url = "https://download.pytorch.org/whl/cu128"
+url = "https://mirrors.aliyun.com/pytorch-wheels/cu128"
+format = "flat"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }

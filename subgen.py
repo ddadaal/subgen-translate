@@ -74,6 +74,7 @@ import io
 import torch
 import ctypes, ctypes.util
 from typing import List
+from translate import configure_translation, create_bilingual_subtitle_if_needed
 
 def convert_to_bool(in_bool):
     # Convert the input to string and lower case, then check against true values
@@ -144,6 +145,10 @@ detect_language_length = int(os.getenv('DETECT_LANGUAGE_LENGTH', 30))
 detect_language_offset = int(os.getenv('DETECT_LANGUAGE_OFFSET', 0))
 model_cleanup_delay = int(os.getenv('MODEL_CLEANUP_DELAY', 30))
 asr_timeout = int(os.getenv('ASR_TIMEOUT', 18000))
+translate_enabled = convert_to_bool(os.getenv('TRANSLATE_ENABLED', False))
+translate_to = os.getenv('TRANSLATE_TO', '').strip()
+translategemma_model = os.getenv('TRANSLATEGEMMA_MODEL', 'google/translategemma-4b-it')
+translate_max_new_tokens = int(os.getenv('TRANSLATE_MAX_NEW_TOKENS', 192))
 
 # Skip Configuration - with backwards compatibility
 skipifexternalsub = get_env_with_fallback('SKIP_IF_EXTERNAL_SUBTITLES_EXIST', 'SKIPIFEXTERNALSUB', False, convert_to_bool)
@@ -1309,17 +1314,49 @@ def gen_subtitles(file_path: str, transcription_type: str, force_language: Langu
             args['regroup'] = custom_regroup
             
         args.update(kwargs)
+
+        configure_translation(
+            model_id=translategemma_model,
+            model_location=model_location,
+            max_new_tokens=translate_max_new_tokens,
+        )
         
         result = model.transcribe(data, language=force_language.to_iso_639_1(), task=transcription_type, verbose=None, **args)
 
         appendLine(result)
 
+        output_language = LanguageCode.from_string(result.language)
+
         # If it is an audio file, write the LRC file
         if is_audio_file and lrc_for_audio_files:
             write_lrc(result, file_name + '.lrc')
         else:
-            output_language = LanguageCode.from_string(result.language)
             result.to_srt_vtt(name_subtitle(file_path, output_language), word_level=word_level_highlight)
+
+            if translate_enabled:
+                bilingual_subtitle_path = create_bilingual_subtitle_if_needed(
+                    result=result,
+                    file_path=file_path,
+                    translate_to=translate_to,
+                    whisper_model=whisper_model,
+                    show_in_subname_subgen=show_in_subname_subgen,
+                    show_in_subname_model=show_in_subname_model,
+                )
+                if bilingual_subtitle_path:
+                    source_language = output_language.to_name() if output_language else (result.language or 'Unknown')
+                    logging.info(
+                        f"Created bilingual subtitle: {os.path.basename(bilingual_subtitle_path)} "
+                        f"({source_language} -> {translate_to})"
+                    )
+                elif translate_to:
+                    logging.debug(
+                        f"Skipping TRANSLATE_TO for {os.path.basename(file_path)} because output language "
+                        f"already matches '{translate_to}'."
+                    )
+            elif translate_to:
+                logging.debug(
+                    f"Skipping TRANSLATE_TO for {os.path.basename(file_path)} because TRANSLATE_ENABLED is False."
+                )
 
     except Exception as e:
         logging.info(f"Error processing or transcribing {file_path} in {force_language}: {e}")

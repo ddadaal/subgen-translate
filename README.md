@@ -3,6 +3,101 @@
 [![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://www.paypal.com/donate/?hosted_button_id=SU4QQP6LH5PF6)
 <img src="https://raw.githubusercontent.com/McCloudS/subgen/main/icon.png" width="200">
 
+## 🍴 Fork Changes (vs. Upstream)
+
+This fork adds a **post-transcription translation pipeline** powered by Google's [`translategemma-4b-it`](https://huggingface.co/google/translategemma-4b-it) model, plus ergonomic CLI improvements.
+
+> CUDA acceleration note: Subgen currently supports **CUDA 12 only** for GPU transcription/translation.
+
+### 1. Bilingual subtitle generation (`TRANSLATE_ENABLED` / `TRANSLATE_TO`)
+
+After Whisper generates a subtitle, Subgen can run a second pass to produce **two additional files**:
+
+| Output file | Content |
+|---|---|
+| `video.subgen.medium.bilingual.ja-zh.srt` | Original line + translated line, interleaved |
+| `video.subgen.medium.zh.srt` | Translated lines only |
+
+Enable with:
+```
+TRANSLATE_ENABLED=True
+TRANSLATE_TO=zh        # any language name or ISO code accepted by TranslateGemma
+```
+
+See the [📝 Subtitle Formatting & Preferences](#-subtitle-formatting--preferences) table for the full list of new env vars (`TRANSLATEGEMMA_MODEL`, `TRANSLATE_MAX_NEW_TOKENS`).
+
+### 2. `launcher.py -S/--srt` — translate an existing SRT file
+
+Translate an existing `.srt` file directly via `launcher.py` without running the server.  
+If both `--srt` and `--file` are given, **`--srt` takes priority** and the video file is ignored.
+
+```sh
+python launcher.py --srt <srt_file> --srt-to <language> [--srt-source-language <lang>]
+```
+
+Examples:
+```sh
+# Translate to Chinese (source language auto-detected):
+python launcher.py --srt "video.srt" --srt-to zh
+
+# Explicit source language:
+python launcher.py -S "video.en.srt" --srt-to Japanese --srt-source-language English
+
+# Target language from subgen.env (TRANSLATE_TO=zh):
+python launcher.py -S "video.srt"
+```
+
+Both output files are always written alongside the source:
+- `video.bilingual.zh.srt` — original + translated, interleaved  
+- `video.zh.srt` — translated only
+
+| Argument | Description |
+|---|---|
+| `-S` / `--srt` | Path to source `.srt` file |
+| `--srt-to` | Target language (e.g. `zh`, `ja`, `Chinese`). Falls back to `TRANSLATE_TO` env var. |
+| `--srt-source-language` | Source language hint (e.g. `en`, `English`). Optional if launcher can infer language from transcribe-generated filename (e.g. `.jpn.srt`). |
+
+### 3. `launcher.py -f/--file` — single-file pipeline mode
+
+Process a single video/audio file through the full transcription + translation pipeline without starting the webhook server:
+
+```sh
+python launcher.py -f "path/to/video.mp4"
+python launcher.py -f "path/to/video.mp4" -t transcribe   # explicit type
+python launcher.py -f "path/to/video.mp4" -t translate    # Whisper translate-to-English mode
+python launcher.py -f "path/to/video.mp4" --language ja    # force transcription language
+```
+
+All env vars (`TRANSLATE_ENABLED`, `TRANSLATE_TO`, `WHISPER_MODEL`, etc.) are loaded from `subgen.env` as normal. Use `-d` to enable debug logging.
+
+| Argument | Description |
+|---|---|
+| `-f` / `--file` | Path to a video/audio file to process directly |
+| `-t` / `--type` | Whisper task type: `transcribe` or `translate` |
+| `--language` | Force transcription language (e.g. `en`, `ja`, `zh`). Takes priority over `FORCE_DETECTED_LANGUAGE_TO` env var. |
+
+### 4. Local config override with `subgen.env.local`
+
+`launcher.py` now loads configuration in this order:
+
+1. `subgen.env`
+2. `subgen.env.local`
+
+This allows keeping a shared base config in `subgen.env` while overriding machine-specific settings locally (for example model path, tokens, or GPU-related options) without committing them. `subgen.env.local` is also added to `.gitignore`.
+
+### Added dependencies
+
+Required only when `TRANSLATE_ENABLED=True` or SRT translation mode is used (`launcher.py --srt ...`). The standard transcription path is not affected.
+
+```
+transformers>=4.57.0
+sentencepiece>=0.2.0
+```
+
+
+
+---
+
 <details>
 <summary><strong>Updates:</strong></summary>
 
@@ -104,8 +199,8 @@ Some shows just won't have subtitles available, or embedded H265 subtitles might
 If you just want to plug Subgen into Bazarr and get going, here is the absolute minimum you need to configure in your Subgen Docker container. **No path mapping or media mounts are needed!**
 
 **1. Set your Environment Variables in Subgen:**
-* `TRANSCRIBE_DEVICE`: Set to `cuda` if you have an Nvidia GPU (highly recommended for speed), otherwise leave as `cpu`.
-* `WHISPER_MODEL`: Default is `medium`. Try `large-v3-turbo` if you have a GPU with 8GB+ VRAM for faster, highly accurate results.
+* `TRANSCRIBE_DEVICE`: Set to `cuda` if you have an Nvidia GPU (highly recommended for speed, **CUDA 12 only**), otherwise leave as `cpu`.
+* `WHISPER_MODEL`: Default is `medium`. Try `large-v3-turbo` if you have a GPU with 8GB+ VRAM for faster, highly accurate results. All variance: https://deepwiki.com/SYSTRAN/faster-whisper#supported-model-variants 
 * `CONCURRENT_TRANSCRIPTIONS`: Default is `2`. Lower to `1` if you are running out of RAM/VRAM.
 
 **2. Configure Bazarr:**
@@ -127,11 +222,16 @@ The easiest way to run Subgen is via Docker. We maintain an image on Docker Hub 
 
 ### 2. Standalone (Without Docker)
 1. Install Python 3.9–3.11 and `ffmpeg`.
-2. Ensure you have the proper NVIDIA drivers/CUDA toolkit installed (if using GPU).
+2. Ensure you have the proper NVIDIA drivers and **CUDA 12** toolkit installed (if using GPU).
 3. Download `launcher.py` from this repository and run:
    > `python3 launcher.py -u -i -s`
 
 *(Launcher includes a wizard to help standalone users easily configure common variables).*
+
+**Single-file mode** (fork addition): process one file directly without starting the server:
+> `python3 launcher.py -f "/path/to/video.mp4"`
+
+Add `-t translate` to use Whisper's translate mode; set `TRANSLATE_ENABLED=True` in `subgen.env` to also generate bilingual subtitles via TranslateGemma.
 
 ### 3. Unraid
 While Unraid doesn't have an app or template for quick install, with minor manual work, you can easily install it. See [this discussion thread](https://github.com/McCloudS/subgen/discussions/137) for pictures and steps.
@@ -189,7 +289,7 @@ Create two separate Webhooks in Tautulli pointing to `http://<your-ip>:9000/taut
 ### 🧠 Core Whisper & AI Settings
 | Variable | Default | Description |
 |---|---|---|
-| `TRANSCRIBE_DEVICE` | `cpu` | Device to transcribe on: `cpu`, `gpu`, or `cuda`. |
+| `TRANSCRIBE_DEVICE` | `cpu` | Device to transcribe on: `cpu`, `gpu`, or `cuda` (**`cuda` requires CUDA 12**). |
 | `WHISPER_MODEL` | `medium` | Model to use: `tiny`, `base`, `small`, `medium`, `large-v3`, `distil-large-v3`, `large-v3-turbo`, etc. |
 | `CONCURRENT_TRANSCRIPTIONS` | `2` | Number of files to process in parallel. |
 | `WHISPER_THREADS` | `4` | Number of CPU threads to use during computation. |
@@ -234,6 +334,10 @@ Create two separate Webhooks in Tautulli pointing to `http://<your-ip>:9000/taut
 | Variable | Default | Description |
 |---|---|---|
 | `TRANSCRIBE_OR_TRANSLATE` | `transcribe` | `transcribe` (matches input language) or `translate` (outputs English). |
+| `TRANSLATE_ENABLED` | `False` | Enables TranslateGemma post-step translation. When `False`, no bilingual subtitle is generated even if `TRANSLATE_TO` is set. |
+| `TRANSLATE_TO` | `''` | Optional post-step translation target (e.g. `Chinese`, `zh`, `ja`). If different from generated subtitle language, Subgen uses `translategemma-4b-it` and writes an extra bilingual `.srt` file. |
+| `TRANSLATEGEMMA_MODEL` | `google/translategemma-4b-it` | Optional Hugging Face model id override for bilingual translation. |
+| `TRANSLATE_MAX_NEW_TOKENS` | `192` | Max generation tokens per subtitle line when creating bilingual translation. |
 | `SUBTITLE_LANGUAGE_NAME` | `aa` | Subtitle file name language code (e.g. `en`). Defaults to `aa` so it floats to the top of Plex's list. |
 | `SUBTITLE_LANGUAGE_NAMING_TYPE`| `ISO_639_2_B` | Format to name files (`ISO_639_1`, `ISO_639_2_T`, `NAME`, `NATIVE`). |
 | `LRC_FOR_AUDIO_FILES` | `True` | Generates `.lrc` instead of `.srt` if processing pure audio files (e.g., mp3, flac). |

@@ -4,6 +4,27 @@ import urllib.request
 import subprocess
 import argparse
 
+
+def infer_source_language_from_srt_path(srt_path):
+    """Try to infer source language from subtitle filename tokens.
+
+    Example: movie.subgen.medium.jpn.srt -> jpn
+    """
+    base_name = os.path.splitext(os.path.basename(srt_path))[0]
+    tokens = base_name.split('.')
+
+    try:
+        from language_code import LanguageCode
+    except Exception:
+        return None
+
+    for token in reversed(tokens):
+        lang = LanguageCode.from_string(token)
+        if lang:
+            return lang.to_iso_639_1() or token
+
+    return None
+
 def convert_to_bool(in_bool):
     # Convert the input to string and lower case, then check against true values
     return str(in_bool).lower() in ('true', 'on', '1', 'y', 'yes')
@@ -97,6 +118,12 @@ def main():
     parser.add_argument('-s', '--setup-bazarr', action='store_true', help="Prompt for common Bazarr setup parameters and save them for future runs")
     parser.add_argument('-b', '--branch', type=str, default='main', help='Specify the branch to download from')
     parser.add_argument('-l', '--launcher-update', action='store_true', help="Update launcher.py and re-launch")
+    parser.add_argument('-f', '--file', type=str, default=None, metavar='VIDEO_PATH', help='Path to a video/audio file to run the full transcription + translation pipeline directly (skips server launch)')
+    parser.add_argument('-t', '--type', type=str, default=None, choices=['transcribe', 'translate'], metavar='TYPE', help='Transcription type for --file mode: "transcribe" or "translate" (default: from TRANSCRIBE_OR_TRANSLATE env var)')
+    parser.add_argument('--language', type=str, default=None, metavar='LANGUAGE', help='Force transcription language (e.g. en, ja, zh). Overrides FORCE_DETECTED_LANGUAGE_TO env var.')
+    parser.add_argument('-S', '--srt', type=str, default=None, metavar='SRT_PATH', help='Path to an existing .srt file to translate directly. Takes priority over --file if both are given.')
+    parser.add_argument('--srt-to', type=str, default=None, metavar='LANGUAGE', help='Target language for --srt mode (e.g. zh, ja, Chinese). Falls back to TRANSLATE_TO env var.')
+    parser.add_argument('--srt-source-language', type=str, default=None, metavar='LANGUAGE', help='Required source language for --srt mode (e.g. en, English).')
 
     args = parser.parse_args()
 
@@ -125,9 +152,11 @@ def main():
         prompt_and_save_bazarr_env_variables()
         # After saving, load them immediately for this run
         load_env_variables()
+        load_env_variables('subgen.env.local')
     else:
         # Load if not setting up, assuming subgen.env might exist
         load_env_variables()
+        load_env_variables('subgen.env.local')
 
 
     # 2. Override with command-line arguments (highest priority for these specific flags)
@@ -145,6 +174,10 @@ def main():
     elif 'APPEND' not in os.environ: # If not set by CLI and not by .env or external
         os.environ['APPEND'] = 'False' # Default to False if nothing else specified it
         #print("Launcher: APPEND defaulted to False (no prior setting)")
+
+    if args.language:
+        os.environ['FORCE_DETECTED_LANGUAGE_TO'] = args.language
+        print(f"Launcher CLI: FORCE_DETECTED_LANGUAGE_TO set to {args.language}")
     # --- End Environment Variable Handling ---
 
 
@@ -164,12 +197,70 @@ def main():
     else:
         print(f"{subgen_script_to_run} exists and UPDATE is set to False, skipping download.")
 
-    if not args.exit_early:
+    if args.srt:
+        # SRT translation mode: takes priority over --file
+        import importlib.util
+        srt_path = os.path.abspath(args.srt)
+        if not os.path.isfile(srt_path):
+            print(f"Error: SRT file not found: {srt_path}")
+            sys.exit(1)
+        target_language = args.srt_to or os.getenv('TRANSLATE_TO', '').strip()
+        if not target_language:
+            print("Error: target language is required. Use --srt-to <language> or set TRANSLATE_TO in subgen.env")
+            sys.exit(1)
+        source_language = (args.srt_source_language or '').strip()
+        if not source_language:
+            inferred_source_language = infer_source_language_from_srt_path(srt_path)
+            if inferred_source_language:
+                source_language = inferred_source_language
+                print(f"Inferred --srt-source-language from subtitle filename: {source_language}")
+        if not source_language:
+            print("Error: --srt-source-language is required in --srt mode when source language cannot be inferred from subtitle filename")
+            sys.exit(1)
+        print(f"Translating SRT: {srt_path}  ->  {target_language}")
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from translate import configure_translation, translate_srt_file_to_bilingual
+        model_id = os.getenv('TRANSLATEGEMMA_MODEL', 'google/translategemma-4b-it')
+        model_location = os.getenv('MODEL_PATH', './models')
+        max_new_tokens = int(os.getenv('TRANSLATE_MAX_NEW_TOKENS', 192))
+        configure_translation(model_id=model_id, model_location=model_location, max_new_tokens=max_new_tokens)
+        output_path = translate_srt_file_to_bilingual(
+            input_srt_path=srt_path,
+            target_language=target_language,
+            source_language=source_language,
+        )
+        print(f"Bilingual SRT written to: {output_path}")
+
+    elif args.file:
+        # Direct pipeline mode: import subgen as a module and call gen_subtitles directly.
+        # This skips server startup — uvicorn is only started when subgen.py is run as __main__.
+        import importlib.util
+        file_path = os.path.abspath(args.file)
+        if not os.path.isfile(file_path):
+            print(f"Error: file not found: {file_path}")
+            sys.exit(1)
+        print(f"Loading {subgen_script_to_run} as module...")
+        spec = importlib.util.spec_from_file_location("subgen", subgen_script_to_run)
+        subgen_mod = importlib.util.module_from_spec(spec)
+        sys.modules["subgen"] = subgen_mod
+        spec.loader.exec_module(subgen_mod)
+        transcription_type = args.type or os.getenv('TRANSCRIBE_OR_TRANSLATE', 'transcribe').lower()
+        force_language = subgen_mod.LanguageCode.NONE
+        if args.language:
+            force_language = subgen_mod.LanguageCode.from_string(args.language)
+            if not force_language:
+                print(f"Error: invalid --language value '{args.language}'")
+                sys.exit(1)
+        print(f"Running pipeline on: {file_path}  (type={transcription_type}, language={args.language or 'auto'})")
+        subgen_mod.gen_subtitles(file_path, transcription_type, force_language)
+
+    elif not args.exit_early:
         #print(f"DEBUG environment variable for subgen.py: {os.getenv('DEBUG')}")
         #print(f"APPEND environment variable for subgen.py: {os.getenv('APPEND')}")
         print(f'Launching {subgen_script_to_run}')
         try:
-            subprocess.run([python_cmd, '-u', subgen_script_to_run], check=True)
+            subprocess.run([python_cmd, subgen_script_to_run], check=True)
+            # subprocess.run(["uv", 'run', subgen_script_to_run], check=True)
         except FileNotFoundError:
             print(f"Error: Could not find {subgen_script_to_run}. Make sure it was downloaded correctly.")
         except subprocess.CalledProcessError as e:

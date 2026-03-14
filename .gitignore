@@ -8,5 +8,8 @@
 
 #ignore our settings
 subgen.env
+subgen.env.local
 
 models/
+
+*.pyc

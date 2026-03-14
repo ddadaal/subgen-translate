@@ -1,3 +1,4 @@
+--extra-index-url https://download.pytorch.org/whl/cu130
 numpy
 stable-ts-whisperless
 fastapi
@@ -7,3 +8,7 @@ uvicorn
 python-multipart
 ffmpeg-python
 watchdog
+torch
+tqdm
+transformers
+sentencepiece
