@@ -17,22 +17,24 @@ translation_model_lock = Lock()
 _model_id = 'google/translategemma-4b-it'
 _model_location = './models'
 _max_new_tokens = 192
+_batch_size = 4
 
 
-def with_progress(iterable, desc: str):
+def with_progress(iterable, desc: str, unit: str = 'line'):
 	try:
 		total = len(iterable)
 	except TypeError:
 		total = None
 
-	return tqdm(iterable, desc=desc, total=total, unit='line')
+	return tqdm(iterable, desc=desc, total=total, unit=unit)
 
 
-def configure_translation(model_id: str, model_location: str, max_new_tokens: int) -> None:
-	global _model_id, _model_location, _max_new_tokens
+def configure_translation(model_id: str, model_location: str, max_new_tokens: int, batch_size: int = 4) -> None:
+	global _model_id, _model_location, _max_new_tokens, _batch_size
 	_model_id = model_id
 	_model_location = model_location
 	_max_new_tokens = max_new_tokens
+	_batch_size = max(1, int(batch_size or 1))
 
 
 def normalize_language_label(value: str) -> str:
@@ -99,6 +101,8 @@ def get_translation_model():
 		if not torch.cuda.is_available():
 			translation_model.to('cpu')
 
+		translation_model.eval()
+
 		tokenizer = getattr(translation_processor, 'tokenizer', None)
 		eos_token_id = getattr(tokenizer, 'eos_token_id', None)
 		if eos_token_id is not None and getattr(translation_model.generation_config, 'pad_token_id', None) is None:
@@ -106,6 +110,123 @@ def get_translation_model():
 
 		logging.info(f'Loaded TranslateGemma model: {_model_id}')
 		return translation_model, translation_processor
+
+
+def _build_translation_message(text: str, source_lang_code: str, target_lang_code: str) -> List[dict]:
+	return [
+		{
+			'role': 'user',
+			'content': [
+				{
+					'type': 'text',
+					'source_lang_code': source_lang_code,
+					'target_lang_code': target_lang_code,
+					'text': text,
+				}
+			],
+		}
+	]
+
+
+def _get_target_dtype(llm_model):
+	if llm_model.device.type != 'cpu' and torch.cuda.is_bf16_supported():
+		return torch.bfloat16
+	return None
+
+
+def _normalize_batch_size(batch_size: Optional[int]) -> int:
+	if batch_size is None:
+		return _batch_size
+	return max(1, int(batch_size or 1))
+
+
+def translate_texts_with_translategemma(
+	texts: List[str],
+	source_language: str,
+	target_language: str,
+	batch_size: Optional[int] = None,
+	progress_desc: Optional[str] = None,
+) -> List[str]:
+	if not texts:
+		return []
+
+	llm_model, llm_processor = get_translation_model()
+	cleaned_texts = [(text or '').strip() for text in texts]
+	if llm_model is None or llm_processor is None:
+		return cleaned_texts
+
+	source_lang_code = to_translategemma_source_lang_code(source_language)
+	target_lang_code = to_translategemma_target_lang_code(target_language)
+	resolved_batch_size = _normalize_batch_size(batch_size)
+	logging.info(
+		'Translation started with TRANSLATE_MAX_NEW_TOKENS=%s, TRANSLATE_BATCH_SIZE=%s '
+		'(source=%s, target=%s, lines=%s)',
+		_max_new_tokens,
+		resolved_batch_size,
+		source_lang_code,
+		target_lang_code,
+		len(texts),
+	)
+
+	translated_lines = [''] * len(cleaned_texts)
+	non_empty_items = [(idx, text) for idx, text in enumerate(cleaned_texts) if text]
+	if not non_empty_items:
+		return translated_lines
+
+	target_dtype = _get_target_dtype(llm_model)
+	batch_offsets = list(range(0, len(non_empty_items), resolved_batch_size))
+	iterable = with_progress(batch_offsets, progress_desc, unit='batch') if progress_desc else batch_offsets
+
+	for start in iterable:
+		batch_items = non_empty_items[start:start + resolved_batch_size]
+		batch_messages = [
+			_build_translation_message(text, source_lang_code, target_lang_code)
+			for _, text in batch_items
+		]
+
+		with translation_model_lock:
+			inputs = llm_processor.apply_chat_template(
+				batch_messages,
+				tokenize=True,
+				add_generation_prompt=True,
+				return_dict=True,
+				return_tensors='pt',
+				padding=True,
+			)
+			if target_dtype is not None:
+				inputs = inputs.to(llm_model.device, dtype=target_dtype)
+			else:
+				inputs = inputs.to(llm_model.device)
+
+			input_len = int(inputs['input_ids'].shape[1])
+
+			tokenizer = getattr(llm_processor, 'tokenizer', None)
+			eos_token_id = getattr(tokenizer, 'eos_token_id', None)
+			pad_token_id = getattr(tokenizer, 'pad_token_id', None)
+			if pad_token_id is None:
+				pad_token_id = eos_token_id
+
+			with torch.inference_mode():
+				generate_kwargs = {
+					# 'max_new_tokens': _max_new_tokens,
+					'do_sample': False,
+				}
+				if pad_token_id is not None:
+					generate_kwargs['pad_token_id'] = pad_token_id
+				if eos_token_id is not None:
+					generate_kwargs['eos_token_id'] = eos_token_id
+
+				output_ids = llm_model.generate(
+					**inputs,
+					**generate_kwargs,
+				)
+
+		for row_idx, (original_idx, original_text) in enumerate(batch_items):
+			generated_ids = output_ids[row_idx][input_len:]
+			translated = llm_processor.decode(generated_ids, skip_special_tokens=True).strip().strip('"')
+			translated_lines[original_idx] = translated if translated else original_text
+
+	return translated_lines
 
 
 def to_translategemma_source_lang_code(language: str) -> str:
@@ -137,71 +258,13 @@ def to_translategemma_target_lang_code(language: str) -> str:
 
 
 def translate_text_with_translategemma(text: str, source_language: str, target_language: str) -> str:
-	clean_text = (text or '').strip()
-	if not clean_text:
-		return ''
-
-	llm_model, llm_processor = get_translation_model()
-	if llm_model is None or llm_processor is None:
-		return clean_text
-
-	source_lang_code = to_translategemma_source_lang_code(source_language)
-	target_lang_code = to_translategemma_target_lang_code(target_language)
-
-	messages = [
-		{
-			'role': 'user',
-			'content': [
-				{
-					'type': 'text',
-					'source_lang_code': source_lang_code,
-					'target_lang_code': target_lang_code,
-					'text': clean_text,
-				}
-			],
-		}
-	]
-
-	target_dtype = torch.bfloat16 if llm_model.device.type != 'cpu' and torch.cuda.is_bf16_supported() else None
-
-	with translation_model_lock:
-		inputs = llm_processor.apply_chat_template(
-			messages,
-			tokenize=True,
-			add_generation_prompt=True,
-			return_dict=True,
-			return_tensors='pt',
-		)
-		if target_dtype is not None:
-			inputs = inputs.to(llm_model.device, dtype=target_dtype)
-		else:
-			inputs = inputs.to(llm_model.device)
-
-		input_len = len(inputs['input_ids'][0])
-		tokenizer = getattr(llm_processor, 'tokenizer', None)
-		eos_token_id = getattr(tokenizer, 'eos_token_id', None)
-		pad_token_id = getattr(tokenizer, 'pad_token_id', None)
-		if pad_token_id is None:
-			pad_token_id = eos_token_id
-
-		with torch.inference_mode():
-			generate_kwargs = {
-				'max_new_tokens': _max_new_tokens,
-				'do_sample': False,
-			}
-			if pad_token_id is not None:
-				generate_kwargs['pad_token_id'] = pad_token_id
-			if eos_token_id is not None:
-				generate_kwargs['eos_token_id'] = eos_token_id
-
-			output_ids = llm_model.generate(
-				**inputs,
-				**generate_kwargs,
-			)
-
-	generated_ids = output_ids[0][input_len:]
-	translated = llm_processor.decode(generated_ids, skip_special_tokens=True).strip().strip('"')
-	return translated if translated else clean_text
+	translated_lines = translate_texts_with_translategemma(
+		texts=[text],
+		source_language=source_language,
+		target_language=target_language,
+		batch_size=1,
+	)
+	return translated_lines[0] if translated_lines else ''
 
 
 def format_srt_timestamp(seconds: float) -> str:
@@ -291,11 +354,12 @@ def create_bilingual_subtitle_if_needed(
 		return None
 
 	source_language = output_language.to_name() if output_language else (result.language or 'Unknown')
-	translated_lines = []
-	for segment in with_progress(result.segments, f'Translating subtitles to {translate_to}'):
-		translated_lines.append(
-			translate_text_with_translategemma(segment.text, source_language, translate_to)
-		)
+	translated_lines = translate_texts_with_translategemma(
+		texts=[segment.text for segment in result.segments],
+		source_language=source_language,
+		target_language=translate_to,
+		progress_desc=f'Translating subtitles to {translate_to}',
+	)
 
 	bilingual_subtitle_path = name_bilingual_subtitle(
 		file_path=file_path,
@@ -409,12 +473,12 @@ def translate_srt_file_to_bilingual(
 	if not cues:
 		raise ValueError('No valid SRT cues found in input file.')
 
-	translated_lines = []
-	for cue in with_progress(cues, f'Translating SRT to {target_language}'):
-		text = '\n'.join(cue['text_lines']).strip()
-		translated_lines.append(
-			translate_text_with_translategemma(text, source_language, target_language)
-		)
+	translated_lines = translate_texts_with_translategemma(
+		texts=['\n'.join(cue['text_lines']).strip() for cue in cues],
+		source_language=source_language,
+		target_language=target_language,
+		progress_desc=f'Translating SRT to {target_language}',
+	)
 
 	final_output_path = output_path or build_cli_output_path(input_srt_path, target_language)
 	write_merged_srt_from_cues(cues, translated_lines, final_output_path)

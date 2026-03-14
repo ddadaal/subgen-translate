@@ -149,6 +149,7 @@ translate_enabled = convert_to_bool(os.getenv('TRANSLATE_ENABLED', False))
 translate_to = os.getenv('TRANSLATE_TO', '').strip()
 translategemma_model = os.getenv('TRANSLATEGEMMA_MODEL', 'google/translategemma-4b-it')
 translate_max_new_tokens = int(os.getenv('TRANSLATE_MAX_NEW_TOKENS', 192))
+translate_batch_size = max(1, int(os.getenv('TRANSLATE_BATCH_SIZE', 4)))
 
 # Skip Configuration - with backwards compatibility
 skipifexternalsub = get_env_with_fallback('SKIP_IF_EXTERNAL_SUBTITLES_EXIST', 'SKIPIFEXTERNALSUB', False, convert_to_bool)
@@ -1319,6 +1320,7 @@ def gen_subtitles(file_path: str, transcription_type: str, force_language: Langu
             model_id=translategemma_model,
             model_location=model_location,
             max_new_tokens=translate_max_new_tokens,
+            batch_size=translate_batch_size,
         )
         
         result = model.transcribe(data, language=force_language.to_iso_639_1(), task=transcription_type, verbose=None, **args)

@@ -223,7 +223,13 @@ def main():
         model_id = os.getenv('TRANSLATEGEMMA_MODEL', 'google/translategemma-4b-it')
         model_location = os.getenv('MODEL_PATH', './models')
         max_new_tokens = int(os.getenv('TRANSLATE_MAX_NEW_TOKENS', 192))
-        configure_translation(model_id=model_id, model_location=model_location, max_new_tokens=max_new_tokens)
+        batch_size = max(1, int(os.getenv('TRANSLATE_BATCH_SIZE', 4)))
+        configure_translation(
+            model_id=model_id,
+            model_location=model_location,
+            max_new_tokens=max_new_tokens,
+            batch_size=batch_size,
+        )
         output_path = translate_srt_file_to_bilingual(
             input_srt_path=srt_path,
             target_language=target_language,
