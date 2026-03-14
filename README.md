@@ -24,7 +24,7 @@ TRANSLATE_ENABLED=True
 TRANSLATE_TO=zh        # any language name or ISO code accepted by TranslateGemma
 ```
 
-See the [📝 Subtitle Formatting & Preferences](#-subtitle-formatting--preferences) table for the full list of new env vars (`TRANSLATEGEMMA_MODEL`, `TRANSLATE_MAX_NEW_TOKENS`).
+See the [📝 Subtitle Formatting & Preferences](#-subtitle-formatting--preferences) table for the full list of new env vars (`TRANSLATEGEMMA_MODEL`, `TRANSLATE_BATCH_SIZE`).
 
 ### 2. `launcher.py -S/--srt` — translate an existing SRT file
 

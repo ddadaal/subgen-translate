@@ -29,11 +29,10 @@ def with_progress(iterable, desc: str, unit: str = 'line'):
 	return tqdm(iterable, desc=desc, total=total, unit=unit)
 
 
-def configure_translation(model_id: str, model_location: str, max_new_tokens: int, batch_size: int = 4) -> None:
-	global _model_id, _model_location, _max_new_tokens, _batch_size
+def configure_translation(model_id: str, model_location: str, batch_size: int = 4) -> None:
+	global _model_id, _model_location, _batch_size
 	_model_id = model_id
 	_model_location = model_location
-	_max_new_tokens = max_new_tokens
 	_batch_size = max(1, int(batch_size or 1))
 
 
@@ -159,7 +158,7 @@ def translate_texts_with_translategemma(
 	target_lang_code = to_translategemma_target_lang_code(target_language)
 	resolved_batch_size = _normalize_batch_size(batch_size)
 	logging.info(
-		'Translation started with TRANSLATE_MAX_NEW_TOKENS=%s, TRANSLATE_BATCH_SIZE=%s '
+		'Translation started with fixed max_new_tokens=%s, TRANSLATE_BATCH_SIZE=%s '
 		'(source=%s, target=%s, lines=%s)',
 		_max_new_tokens,
 		resolved_batch_size,
@@ -208,7 +207,7 @@ def translate_texts_with_translategemma(
 
 			with torch.inference_mode():
 				generate_kwargs = {
-					# 'max_new_tokens': _max_new_tokens,
+					'max_new_tokens': _max_new_tokens,
 					'do_sample': False,
 				}
 				if pad_token_id is not None:

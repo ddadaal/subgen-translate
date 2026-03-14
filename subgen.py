@@ -148,7 +148,6 @@ asr_timeout = int(os.getenv('ASR_TIMEOUT', 18000))
 translate_enabled = convert_to_bool(os.getenv('TRANSLATE_ENABLED', False))
 translate_to = os.getenv('TRANSLATE_TO', '').strip()
 translategemma_model = os.getenv('TRANSLATEGEMMA_MODEL', 'google/translategemma-4b-it')
-translate_max_new_tokens = int(os.getenv('TRANSLATE_MAX_NEW_TOKENS', 192))
 translate_batch_size = max(1, int(os.getenv('TRANSLATE_BATCH_SIZE', 4)))
 
 # Skip Configuration - with backwards compatibility
@@ -1319,7 +1318,6 @@ def gen_subtitles(file_path: str, transcription_type: str, force_language: Langu
         configure_translation(
             model_id=translategemma_model,
             model_location=model_location,
-            max_new_tokens=translate_max_new_tokens,
             batch_size=translate_batch_size,
         )
         
